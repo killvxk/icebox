@@ -1,10 +1,14 @@
 #define FDP_MODULE "tests"
+#include <icebox/callstack.hpp>
 #include <icebox/core.hpp>
 #include <icebox/log.hpp>
 #include <icebox/os.hpp>
 #include <icebox/plugins/sym_loader.hpp>
 #include <icebox/reader.hpp>
+#include <icebox/sym.hpp>
+#include <icebox/tracer/syscalls.gen.hpp>
 #include <icebox/tracer/syscalls32.gen.hpp>
+#include <icebox/tracer/tracer.hpp>
 #include <icebox/utils/fnview.hpp>
 #include <icebox/waiter.hpp>
 
@@ -12,6 +16,7 @@
 #include <gtest/gtest.h>
 
 #include <map>
+#include <unordered_set>
 
 namespace
 {
@@ -223,8 +228,8 @@ TEST_F(Win10Test, unable_to_single_step_query_information_process)
     const auto ntdll = waiter::mod_wait(core, *proc, "ntdll.dll", FLAGS_32BIT);
     EXPECT_TRUE(!!ntdll);
 
-    auto loader   = sym::Loader{core, *proc};
-    const auto ok = loader.load(*ntdll);
+    auto loader   = sym::Loader{core};
+    const auto ok = loader.mod_load(*proc, *ntdll);
     EXPECT_TRUE(ok);
 
     wow64::syscalls32 tracer{core, loader.symbols(), "ntdll"};
@@ -247,8 +252,8 @@ TEST_F(Win10Test, unset_bp_when_two_bps_share_phy_page)
     const auto ntdll = waiter::mod_wait(core, *proc, "ntdll.dll", FLAGS_32BIT);
     EXPECT_TRUE(!!ntdll);
 
-    auto loader   = sym::Loader{core, *proc};
-    const auto ok = loader.load(*ntdll);
+    auto loader   = sym::Loader{core};
+    const auto ok = loader.mod_load(*proc, *ntdll);
     EXPECT_TRUE(ok);
 
     // break on a single function once
@@ -319,4 +324,105 @@ TEST_F(Win10Test, memory)
         EXPECT_TRUE(!!phy);
         return WALK_NEXT;
     });
+}
+
+namespace
+{
+    static size_t count_symbols(sym::Symbols& symbols)
+    {
+        size_t count  = 0;
+        const auto ok = symbols.list([&](const auto& /*sym*/)
+        {
+            ++count;
+            return WALK_NEXT;
+        });
+        EXPECT_TRUE(ok);
+        return count;
+    }
+}
+
+TEST_F(Win10Test, loader)
+{
+    const auto proc = waiter::proc_wait(core, "dwm.exe", FLAGS_NONE);
+    ASSERT_TRUE(!!proc);
+
+    core.os->proc_join(*proc, os::JOIN_ANY_MODE);
+    auto drivers = sym::Loader{core};
+    drivers.drv_listen({});
+    EXPECT_GE(count_symbols(drivers.symbols()), 128u);
+
+    core.os->proc_join(*proc, os::JOIN_USER_MODE);
+    auto modules = sym::Loader{core};
+    modules.mod_listen(*proc, {});
+    EXPECT_GE(count_symbols(modules.symbols()), 32u);
+
+    const auto ntdll = waiter::mod_wait(core, *proc, "ntdll.dll", FLAGS_NONE);
+    ASSERT_TRUE(ntdll);
+}
+
+TEST_F(Win10Test, tracer)
+{
+    const auto proc = waiter::proc_wait(core, "dwm.exe", FLAGS_NONE);
+    ASSERT_TRUE(!!proc);
+
+    core.os->proc_join(*proc, os::JOIN_USER_MODE);
+    const auto ntdll = waiter::mod_wait(core, *proc, "ntdll.dll", FLAGS_NONE);
+    ASSERT_TRUE(ntdll);
+
+    auto loader = sym::Loader{core};
+    loader.mod_load(*proc, *ntdll);
+
+    using Calls = std::unordered_set<std::string>;
+    auto calls  = Calls{};
+    auto tracer = nt::syscalls{core, loader.symbols(), "ntdll"};
+    auto count  = 0;
+    tracer.register_all(*proc, [&](const auto& cfg)
+    {
+        calls.insert(cfg.name);
+        ++count;
+    });
+    run_until(core, [&] { return count > 32; });
+    for(const auto& call : calls)
+        LOG(INFO, "call: {}", call);
+}
+
+namespace
+{
+    static std::string dump_address(sym::Symbols& symbols, uint64_t addr)
+    {
+        const auto cur = symbols.find(addr);
+        if(!cur)
+            return fmt::format("{:#x}", addr);
+
+        return sym::to_string(*cur);
+    }
+}
+
+TEST_F(Win10Test, callstacks)
+{
+    const auto proc = waiter::proc_wait(core, "dwm.exe", FLAGS_NONE);
+    ASSERT_TRUE(!!proc);
+
+    auto loader = sym::Loader{core};
+    loader.mod_listen(*proc, {});
+    const auto ntdll = waiter::mod_wait(core, *proc, "ntdll.dll", FLAGS_NONE);
+    ASSERT_TRUE(ntdll);
+
+    auto& symbols   = loader.symbols();
+    auto tracer     = nt::syscalls{core, symbols, "ntdll"};
+    auto callstacks = callstack::make_callstack_nt(core);
+    auto count      = size_t{0};
+    tracer.register_all(*proc, [&](const auto& /* cfg*/)
+    {
+        LOG(INFO, "");
+        auto idx = size_t{0};
+        callstacks->get_callstack(*proc, [&](callstack::callstep_t step)
+        {
+            const auto symbol = dump_address(symbols, step.addr);
+            LOG(INFO, "{:#x}: {}", idx++, symbol);
+            return WALK_NEXT;
+        });
+        count++;
+    });
+    run_until(core, [&] { return count > 32; });
 }
