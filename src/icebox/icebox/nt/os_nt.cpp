@@ -185,6 +185,13 @@ namespace
         opt<span_t>         mod_span(proc_t proc, mod_t mod) override;
         opt<mod_t>          mod_find(proc_t proc, uint64_t addr) override;
 
+        bool                vm_area_list    (proc_t proc, on_vm_area_fn on_vm_area) override;
+        opt<vm_area_t>      vm_area_find    (proc_t proc, uint64_t addr) override;
+        opt<span_t>         vm_area_span    (proc_t proc, vm_area_t vm_area) override;
+        vma_access_e        vm_area_access  (proc_t proc, vm_area_t vm_area) override;
+        vma_type_e          vm_area_type    (proc_t proc, vm_area_t vm_area) override;
+        opt<std::string>    vm_area_name    (proc_t proc, vm_area_t vm_area) override;
+
         bool                driver_list (on_driver_fn on_driver) override;
         opt<driver_t>       driver_find (uint64_t addr) override;
         opt<std::string>    driver_name (driver_t drv) override;
@@ -847,7 +854,7 @@ opt<mod_t> OsNt::mod_find(proc_t proc, uint64_t addr)
         if(!span)
             return WALK_NEXT;
 
-        if(!(span->addr <= addr && addr <= span->addr + span->size))
+        if(!(span->addr <= addr && addr < span->addr + span->size))
             return WALK_NEXT;
 
         found = mod;
@@ -910,6 +917,36 @@ opt<span_t> OsNt::mod_span(proc_t proc, mod_t mod)
     return mod_span_64(reader, mod);
 }
 
+bool OsNt::vm_area_list(proc_t /*proc*/, on_vm_area_fn /*on_vm_area*/)
+{
+    return false;
+}
+
+opt<vm_area_t> OsNt::vm_area_find(proc_t /*proc*/, uint64_t /*addr*/)
+{
+    return {};
+}
+
+opt<span_t> OsNt::vm_area_span(proc_t /*proc*/, vm_area_t /*vm_area*/)
+{
+    return {};
+}
+
+vma_access_e OsNt::vm_area_access(proc_t /*proc*/, vm_area_t /*vm_area*/)
+{
+    return VMA_ACCESS_NONE;
+}
+
+vma_type_e OsNt::vm_area_type(proc_t /*proc*/, vm_area_t /*vm_area*/)
+{
+    return vma_type_e::none;
+}
+
+opt<std::string> OsNt::vm_area_name(proc_t /*proc*/, vm_area_t /*vm_area*/)
+{
+    return {};
+}
+
 bool OsNt::driver_list(on_driver_fn on_driver)
 {
     const auto head = symbols_[PsLoadedModuleList];
@@ -928,7 +965,7 @@ opt<driver_t> OsNt::driver_find(uint64_t addr)
         if(!span)
             return WALK_NEXT;
 
-        if(!(span->addr <= addr && addr <= span->addr + span->size))
+        if(!(span->addr <= addr && addr < span->addr + span->size))
             return WALK_NEXT;
 
         found = drv;
